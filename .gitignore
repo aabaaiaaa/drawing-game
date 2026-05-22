@@ -20,3 +20,10 @@ Thumbs.db
 # Logs
 *.log
 npm-debug.log*
+
+# Claude Code session state
+.claude/
+
+# Playwright
+test-results/
+playwright-report/

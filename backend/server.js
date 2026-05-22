@@ -14,6 +14,8 @@ const io = socketIo(server, {
   }
 });
 
+const E2E_TEST = process.env.E2E_TEST === '1';
+
 const rooms = new Map();
 const words = [
   // Original words
@@ -65,7 +67,7 @@ function getRandomWord() {
 io.on('connection', (socket) => {
   console.log('New client connected:', socket.id);
 
-  socket.on('createRoom', ({ playerName, rounds, timePerRound }) => {
+  socket.on('createRoom', ({ playerName, rounds, timePerRound, testWords }) => {
     const roomCode = Math.random().toString(36).substring(2, 8).toUpperCase();
     const player = {
       id: socket.id,
@@ -87,7 +89,9 @@ io.on('connection', (socket) => {
       currentDrawerIndex: 0,
       currentWord: null,
       roundStartTime: null,
-      revealedLetters: new Map()
+      revealedLetters: new Map(),
+      testWords: E2E_TEST && Array.isArray(testWords) && testWords.length > 0 ? testWords : null,
+      testWordIndex: 0
     });
 
     socket.join(roomCode);
@@ -312,34 +316,72 @@ io.on('connection', (socket) => {
 
     rooms.forEach((room, roomCode) => {
       const playerIndex = room.players.findIndex(p => p.id === socket.id);
+      if (playerIndex === -1) return;
 
-      if (playerIndex !== -1) {
-        const player = room.players[playerIndex];
+      const player = room.players[playerIndex];
+      const wasDrawer = room.gameStarted && playerIndex === room.currentDrawerIndex;
 
-        if (room.gameStarted) {
-          io.to(roomCode).emit('playerLeft', {
-            playerId: player.id,
-            playerName: player.name,
-            players: room.players
-          });
-        } else {
-          room.players.splice(playerIndex, 1);
+      room.players.splice(playerIndex, 1);
 
-          if (room.players.length === 0) {
-            rooms.delete(roomCode);
-            console.log(`Room ${roomCode} deleted (empty)`);
-          } else {
-            if (room.host === socket.id) {
-              room.host = room.players[0].id;
-              room.players[0].isHost = true;
-            }
-            io.to(roomCode).emit('playerLeft', {
-              playerId: player.id,
-              playerName: player.name,
-              players: room.players
-            });
+      // Keep currentDrawerIndex pointing at the same logical "next" player
+      // after the splice. If somebody before the drawer left, the drawer
+      // shifted left by one.
+      if (room.gameStarted && !wasDrawer && playerIndex < room.currentDrawerIndex) {
+        room.currentDrawerIndex--;
+      }
+
+      if (room.players.length === 0) {
+        if (room.roundTimer) {
+          clearTimeout(room.roundTimer);
+          room.roundTimer = null;
+        }
+        rooms.delete(roomCode);
+        console.log(`Room ${roomCode} deleted (empty)`);
+        return;
+      }
+
+      if (room.host === socket.id) {
+        room.host = room.players[0].id;
+        room.players[0].isHost = true;
+      }
+
+      io.to(roomCode).emit('playerLeft', {
+        playerId: player.id,
+        playerName: player.name,
+        players: room.players
+      });
+
+      if (!room.gameStarted) return;
+
+      // In-game departure: end the game if we can't continue, otherwise
+      // advance the turn if the drawer was the one who left.
+      if (room.players.length < 2) {
+        if (room.roundTimer) {
+          clearTimeout(room.roundTimer);
+          room.roundTimer = null;
+        }
+        endGame(roomCode);
+        return;
+      }
+
+      if (wasDrawer) {
+        if (room.roundTimer) {
+          clearTimeout(room.roundTimer);
+          room.roundTimer = null;
+        }
+        io.to(roomCode).emit('turnEnded', { word: room.currentWord });
+
+        // The splice shifted the next player into the drawer slot, so we
+        // don't increment currentDrawerIndex — only handle wrap/round end.
+        if (room.currentDrawerIndex >= room.players.length) {
+          room.currentDrawerIndex = 0;
+          room.currentRound++;
+          if (room.currentRound > room.totalRounds) {
+            endGame(roomCode);
+            return;
           }
         }
+        setTimeout(() => startNewTurn(roomCode), 3000);
       }
     });
   });
@@ -349,7 +391,12 @@ function startNewTurn(roomCode) {
   const room = rooms.get(roomCode);
   if (!room) return;
 
-  room.currentWord = getRandomWord();
+  if (room.testWords) {
+    room.currentWord = room.testWords[room.testWordIndex % room.testWords.length];
+    room.testWordIndex++;
+  } else {
+    room.currentWord = getRandomWord();
+  }
   room.roundStartTime = Date.now();
   room.revealedLetters.clear();
 
@@ -408,6 +455,11 @@ function endGame(roomCode) {
   const room = rooms.get(roomCode);
   if (!room) return;
 
+  if (room.roundTimer) {
+    clearTimeout(room.roundTimer);
+    room.roundTimer = null;
+  }
+
   const sortedPlayers = [...room.players].sort((a, b) => b.score - a.score);
 
   io.to(roomCode).emit('gameEnded', {
@@ -419,7 +471,11 @@ function endGame(roomCode) {
   room.currentWord = null;
 }
 
-const PORT = process.env.PORT || 3001;
-server.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});
+if (require.main === module) {
+  const PORT = process.env.PORT || 3001;
+  server.listen(PORT, () => {
+    console.log(`Server running on port ${PORT}`);
+  });
+}
+
+module.exports = { app, server, io, rooms };

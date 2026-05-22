@@ -86,6 +86,8 @@ function GameContent() {
 
     socket.on('playerLeft', ({ playerName, players }) => {
       setPlayers(players)
+      // Keep the local player record in sync (e.g. when host transfers to us).
+      setPlayer(prev => prev ? (players.find(p => p.id === prev.id) ?? prev) : prev)
       showNotification(`${playerName} left the game`)
     })
 
@@ -200,7 +202,8 @@ function GameContent() {
   }
 
   const createRoom = (playerName, rounds, timePerRound) => {
-    socket.emit('createRoom', { playerName, rounds, timePerRound })
+    const testWords = typeof window !== 'undefined' ? window.__E2E_WORDS : undefined
+    socket.emit('createRoom', { playerName, rounds, timePerRound, testWords })
   }
 
   const joinRoom = (roomCode, playerName) => {
